@@ -1,0 +1,6 @@
+{
+  "name": "Rayva Cloud",
+  "description": "Small-scale cloud computing and distributed job scheduling platform",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
