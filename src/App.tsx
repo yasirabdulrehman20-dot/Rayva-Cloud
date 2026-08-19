@@ -202,11 +202,12 @@ function RayvaCloudContent() {
         };
 
         ws.onmessage = (event) => {
-          if (isUnmounted || !isAutoRefreshRef.current) return;
+          if (isUnmounted) return;
           try {
             const parsed = JSON.parse(event.data);
             if (parsed.data) {
               if (parsed.data.status) setStatus(parsed.data.status);
+              if (!isAutoRefreshRef.current) return;
               if (parsed.data.workers) {
                 setWorkers(parsed.data.workers);
                 processStateToasts(parsed.data.workers, undefined);
@@ -275,6 +276,22 @@ function RayvaCloudContent() {
     const interval = setInterval(fetchData, 2000);
     return () => clearInterval(interval);
   }, [isAutoRefresh]);
+
+  // Keep authoritative system status synchronized even when detailed auto-refresh is paused.
+  useEffect(() => {
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch('/api/system/status', { headers: getAuthHeaders() });
+        if (res.ok) {
+          const data = await res.json();
+          if (data?.data) setStatus(data.data);
+        }
+      } catch {
+        // WebSocket and the detailed polling loop remain responsible for other state.
+      }
+    }, 2000);
+    return () => clearInterval(interval);
+  }, [token]);
 
   // Handler actions
   const handleChangeStrategy = async (strat: SchedulerStrategyType) => {
