@@ -765,7 +765,7 @@ apiRouter.get('/system/status', (req, res) => {
   res.json({ status: 'ok', data: status });
 });
 
-apiRouter.post('/system/maintenance', requireAuth, (req, res) => {
+apiRouter.post('/system/maintenance', requireAuth, (req: AuthenticatedRequest, res: Response) => {
   const { enabled } = req.body;
   if (typeof enabled !== 'boolean') {
     return res.status(400).json({ error: 'Property "enabled" must be a boolean.' });
