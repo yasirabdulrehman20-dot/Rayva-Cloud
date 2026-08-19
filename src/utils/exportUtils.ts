@@ -1,6 +1,155 @@
 import jsPDF from 'jspdf';
-import { SystemLog, ExecutionRecord, SystemStatus, SystemSnapshot, WorkerNodeData, Job } from '../shared/types.js';
+import { SystemLog, ExecutionRecord, SystemStatus, SystemSnapshot, WorkerNodeData, Job, User } from '../shared/types.js';
 import { getWorkerDisplayName } from '../shared/workerUtils.js';
+
+type ExportUser = Pick<User, 'id' | 'email' | 'role'>;
+
+function isAdminUser(currentUser?: ExportUser | null): boolean {
+  return currentUser?.role === 'Cluster Admin';
+}
+
+function logBelongsToUser(log: SystemLog, currentUser: ExportUser): boolean {
+  if (log.component.toLowerCase() === 'auth') return false;
+
+  const metadata = log.metadata || {};
+  const metadataUserId = metadata.userId || metadata.ownerId || metadata.createdBy;
+  const metadataEmail = metadata.userEmail || metadata.email;
+
+  return metadataUserId === currentUser.id || metadataEmail === currentUser.email;
+}
+
+function filterLogsForExport(logs: SystemLog[], currentUser?: ExportUser | null): SystemLog[] {
+  if (isAdminUser(currentUser)) return logs;
+  if (!currentUser) return [];
+  return logs.filter((log) => logBelongsToUser(log, currentUser));
+}
+
+function filterRecordsForExport(
+  records: ExecutionRecord[],
+  jobs: Job[] | undefined,
+  currentUser?: ExportUser | null
+): ExecutionRecord[] {
+  if (isAdminUser(currentUser)) return records;
+  if (!currentUser || !jobs) return [];
+
+  const ownedJobIds = new Set(
+    jobs.filter((job) => job.userId === currentUser.id).map((job) => job.id)
+  );
+  return records.filter((record) => ownedJobIds.has(record.jobId));
+}
+
+const PDF_CONTENT_LEFT = 14;
+const PDF_CONTENT_RIGHT = 196;
+const PDF_CONTENT_WIDTH = PDF_CONTENT_RIGHT - PDF_CONTENT_LEFT;
+const PDF_SAFE_BOTTOM = 268;
+const PDF_TABLE_ROW_HEIGHT = 6.5;
+const PDF_TABLE_LINE_HEIGHT = 4.8;
+const PDF_TABLE_TOP_PADDING = 2.2;
+const PDF_TABLE_BOTTOM_PADDING = 2.2;
+
+function fitPdfText(doc: jsPDF, value: unknown, maxWidth: number): string {
+  const text = String(value ?? '');
+  if (!text || maxWidth <= 0) return '';
+  if (doc.getTextWidth(text) <= maxWidth) return text;
+
+  let result = text;
+  while (result.length > 1 && doc.getTextWidth(`${result}...`) > maxWidth) {
+    result = result.slice(0, -1);
+  }
+  return result.length > 1 ? `${result}...` : '...';
+}
+
+function wrapPdfText(doc: jsPDF, value: unknown, maxWidth: number): string[] {
+  const text = String(value ?? '');
+  if (!text || maxWidth <= 0) return [''];
+
+  const splitLines = doc.splitTextToSize(text, maxWidth) as string[];
+  const lines: string[] = [];
+  splitLines.forEach((splitLine) => {
+    let line = '';
+    for (const character of splitLine) {
+      const candidate = line + character;
+      if (line && doc.getTextWidth(candidate) > maxWidth) {
+        lines.push(line);
+        line = character;
+      } else {
+        line = candidate;
+      }
+    }
+    if (line || !lines.length) lines.push(line);
+  });
+  return lines.length ? lines : [''];
+}
+
+interface PdfTableRowLayout {
+  cells: string[][];
+  rowHeight: number;
+}
+
+function createPdfTableRowLayout(
+  doc: jsPDF,
+  values: string[],
+  columns: Array<{ x: number; width: number }>
+): PdfTableRowLayout {
+  const cells = columns.map((column, index) => wrapPdfText(doc, values[index], column.width - 4));
+  const lineCount = Math.max(...cells.map((lines) => lines.length));
+  const rowHeight = Math.max(
+    PDF_TABLE_ROW_HEIGHT,
+    lineCount * PDF_TABLE_LINE_HEIGHT + PDF_TABLE_TOP_PADDING + PDF_TABLE_BOTTOM_PADDING
+  );
+  return { cells, rowHeight };
+}
+
+function drawPdfTableHeader(
+  doc: jsPDF,
+  y: number,
+  columns: Array<{ label: string; x: number; width: number }>
+): number {
+  doc.setFillColor(241, 245, 249);
+  doc.rect(PDF_CONTENT_LEFT, y, PDF_CONTENT_WIDTH, 8, 'F');
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(8);
+  doc.setTextColor(51, 65, 85);
+  columns.forEach((column) => {
+    doc.text(fitPdfText(doc, column.label, column.width - 4), column.x + 2, y + 5.5);
+  });
+  return y + 11;
+}
+
+function drawPdfTableRow(
+  doc: jsPDF,
+  rowTop: number,
+  layout: PdfTableRowLayout,
+  columns: Array<{ x: number; width: number }>,
+  rowIndex: number,
+  colors: string[] = []
+): number {
+  if (rowIndex % 2 === 1) {
+    doc.setFillColor(248, 250, 252);
+    doc.rect(PDF_CONTENT_LEFT, rowTop, PDF_CONTENT_WIDTH, layout.rowHeight, 'F');
+  }
+
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(8);
+  columns.forEach((column, index) => {
+    doc.setTextColor(colors[index] || '334155');
+    layout.cells[index].forEach((line, lineIndex) => {
+      doc.text(line, column.x + 2, rowTop + PDF_TABLE_TOP_PADDING + lineIndex * PDF_TABLE_LINE_HEIGHT);
+    });
+  });
+  return rowTop + layout.rowHeight;
+}
+
+function startContinuationPage(
+  doc: jsPDF,
+  title: string,
+  subtitle: string,
+  columns: Array<{ label: string; x: number; width: number }>
+): number {
+  doc.addPage();
+  drawRayvaPdfHeader(doc, title, subtitle);
+  return drawPdfTableHeader(doc, 38, columns);
+}
 
 export function downloadJsonFile(filename: string, data: unknown) {
   const jsonStr = JSON.stringify(data, null, 2);
@@ -85,7 +234,7 @@ function drawRayvaPdfHeader(doc: jsPDF, titleText: string, subtitleText: string)
   // Report Title
   doc.setTextColor(226, 232, 240);
   doc.setFontSize(9.5);
-  const truncatedTitle = titleText.length > 36 ? titleText.substring(0, 34) + '...' : titleText;
+  const truncatedTitle = fitPdfText(doc, titleText, 125);
   doc.text(`—  ${truncatedTitle.toUpperCase()}`, 74, 14.5);
 
   // Subtitle Metadata Line
@@ -125,8 +274,10 @@ function drawRayvaPdfFooter(doc: jsPDF) {
 
 export function exportLogsToJson(
   logs: SystemLog[],
-  filterInfo?: { level: string; search: string }
+  filterInfo?: { level: string; search: string },
+  currentUser?: ExportUser | null
 ) {
+  const exportLogs = filterLogsForExport(logs, currentUser);
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
   const filename = `rayva_system_logs_${timestamp}.json`;
 
@@ -134,9 +285,9 @@ export function exportLogsToJson(
     system: 'Rayva Cloud',
     exportType: 'System Audit Logs',
     exportedAt: new Date().toISOString(),
-    totalCount: logs.length,
+    totalCount: exportLogs.length,
     activeFilter: filterInfo || { level: 'ALL', search: '' },
-    logs,
+    logs: exportLogs,
   };
 
   downloadJsonFile(filename, payload);
@@ -144,88 +295,50 @@ export function exportLogsToJson(
 
 export function exportLogsToPdf(
   logs: SystemLog[],
-  filterInfo?: { level: string; search: string }
+  filterInfo?: { level: string; search: string },
+  currentUser?: ExportUser | null
 ) {
+  const exportLogs = filterLogsForExport(logs, currentUser);
   const doc = new jsPDF();
   const timestamp = new Date().toLocaleString();
+  const columns = [
+    { label: 'TIME', x: 14, width: 28 },
+    { label: 'LEVEL', x: 42, width: 23 },
+    { label: 'COMPONENT', x: 65, width: 38 },
+    { label: 'MESSAGE', x: 103, width: 93 },
+  ];
 
   drawRayvaPdfHeader(
     doc,
     'Audit Logs Report',
-    `Exported: ${timestamp} | Filter: ${filterInfo?.level || 'ALL'} | Search: "${filterInfo?.search || ''}" | Count: ${logs.length}`
+    `Exported: ${timestamp} | Filter: ${filterInfo?.level || 'ALL'} | Search: "${filterInfo?.search || ''}" | Count: ${exportLogs.length}`
   );
 
   let y = 38;
 
-  // Table header
-  doc.setFillColor(241, 245, 249);
-  doc.rect(14, y, 182, 8, 'F');
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(8);
-  doc.setTextColor(51, 65, 85);
-  doc.text('TIMESTAMP', 16, y + 5.5);
-  doc.text('LEVEL', 50, y + 5.5);
-  doc.text('COMPONENT', 75, y + 5.5);
-  doc.text('EVENT MESSAGE', 110, y + 5.5);
-
-  y += 11;
-  doc.setFont('helvetica', 'normal');
-  doc.setFontSize(8);
-
-  const pageHeight = 280;
-
-  logs.slice(0, 100).forEach((log) => {
-    if (y > pageHeight) {
-      doc.addPage();
-      drawRayvaPdfHeader(
+  y = drawPdfTableHeader(doc, y, columns);
+  exportLogs.forEach((log, index) => {
+    const values = [new Date(log.timestamp).toLocaleTimeString(), log.level, log.component, log.message];
+    const layout = createPdfTableRowLayout(doc, values, columns);
+    if (y + layout.rowHeight > PDF_SAFE_BOTTOM) {
+      y = startContinuationPage(
         doc,
         'Audit Logs Report (Cont.)',
-        `Exported: ${timestamp} | Filter: ${filterInfo?.level || 'ALL'}`
+        `Exported: ${timestamp} | Filter: ${filterInfo?.level || 'ALL'}`,
+        columns
       );
-      y = 38;
-      // Header for sub-pages
-      doc.setFillColor(241, 245, 249);
-      doc.rect(14, y, 182, 8, 'F');
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(8);
-      doc.setTextColor(51, 65, 85);
-      doc.text('TIMESTAMP', 16, y + 5.5);
-      doc.text('LEVEL', 50, y + 5.5);
-      doc.text('COMPONENT', 75, y + 5.5);
-      doc.text('EVENT MESSAGE', 110, y + 5.5);
-      y += 11;
-      doc.setFont('helvetica', 'normal');
-      doc.setFontSize(8);
     }
 
-    const timeStr = new Date(log.timestamp).toLocaleTimeString();
-
-    doc.setTextColor(100, 116, 139);
-    doc.text(timeStr, 16, y);
-
-    if (log.level === 'ERROR') doc.setTextColor(225, 29, 72);
-    else if (log.level === 'WARNING') doc.setTextColor(217, 119, 6);
-    else doc.setTextColor(2, 132, 199);
-
-    doc.setFont('helvetica', 'bold');
-    doc.text(log.level, 50, y);
-
-    doc.setFont('helvetica', 'normal');
-    doc.setTextColor(51, 65, 85);
-    doc.text(log.component.substring(0, 16), 75, y);
-
-    const truncatedMsg = log.message.length > 52 ? log.message.substring(0, 50) + '...' : log.message;
-    doc.text(truncatedMsg, 110, y);
-
-    y += 6;
+    const levelColor = log.level === 'ERROR' ? 'e11d48' : log.level === 'WARNING' ? 'd97706' : '0284c7';
+    y = drawPdfTableRow(
+      doc,
+      y,
+      layout,
+      columns,
+      index,
+      ['64748b', levelColor, '334155', '334155']
+    );
   });
-
-  if (logs.length > 100) {
-    y += 4;
-    doc.setFont('helvetica', 'italic');
-    doc.setTextColor(148, 163, 184);
-    doc.text(`* Truncated to first 100 log entries out of ${logs.length} total. Export JSON for full dataset.`, 14, y);
-  }
 
   const fileTimestamp = new Date().toISOString().replace(/[:.]/g, '-');
   drawRayvaPdfFooter(doc);
@@ -234,8 +347,11 @@ export function exportLogsToPdf(
 
 export function exportLedgerToJson(
   records: ExecutionRecord[],
-  verificationStatus?: { valid: boolean; recordCount: number; errors: string[] } | null
+  verificationStatus?: { valid: boolean; recordCount: number; errors: string[] } | null,
+  currentUser?: ExportUser | null,
+  jobs?: Job[]
 ) {
+  const exportRecords = filterRecordsForExport(records, jobs, currentUser);
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
   const filename = `rayva_execution_ledger_${timestamp}.json`;
 
@@ -243,9 +359,9 @@ export function exportLedgerToJson(
     system: 'Rayva Cloud',
     exportType: 'Verifiable Execution Ledger Audit Chain',
     exportedAt: new Date().toISOString(),
-    totalRecordsCount: records.length,
+    totalRecordsCount: exportRecords.length,
     verificationStatus: verificationStatus || null,
-    records,
+    records: exportRecords,
   };
 
   downloadJsonFile(filename, payload);
@@ -253,77 +369,51 @@ export function exportLedgerToJson(
 
 export function exportLedgerToPdf(
   records: ExecutionRecord[],
-  verificationStatus?: { valid: boolean; recordCount: number; errors: string[] } | null
+  verificationStatus?: { valid: boolean; recordCount: number; errors: string[] } | null,
+  currentUser?: ExportUser | null,
+  jobs?: Job[]
 ) {
+  const exportRecords = filterRecordsForExport(records, jobs, currentUser);
   const doc = new jsPDF();
   const timestamp = new Date().toLocaleString();
+  const columns = [
+    { label: 'REC ID', x: 14, width: 40 },
+    { label: 'JOB ID', x: 54, width: 36 },
+    { label: 'WORKER', x: 90, width: 33 },
+    { label: 'RECORD HASH (SHA-256)', x: 123, width: 73 },
+  ];
 
   const statusText = verificationStatus?.valid ? 'VERIFIED VALID [100% Hash Match]' : 'AUDITED';
 
   drawRayvaPdfHeader(
     doc,
     'Execution Ledger Audit',
-    `Exported: ${timestamp} | Chain Status: ${statusText} | Records: ${records.length}`
+    `Exported: ${timestamp} | Chain Status: ${statusText} | Records: ${exportRecords.length}`
   );
 
   let y = 38;
 
-  doc.setFillColor(241, 245, 249);
-  doc.rect(14, y, 182, 8, 'F');
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(8);
-  doc.setTextColor(51, 65, 85);
-  doc.text('REC ID', 16, y + 5.5);
-  doc.text('JOB ID', 38, y + 5.5);
-  doc.text('WORKER', 68, y + 5.5);
-  doc.text('TIMESTAMP', 102, y + 5.5);
-  doc.text('RECORD HASH (SHA-256)', 138, y + 5.5);
-
-  y += 11;
-  doc.setFont('helvetica', 'normal');
-  doc.setFontSize(8);
-
-  const pageHeight = 280;
-
-  records.forEach((r) => {
-    if (y > pageHeight) {
-      doc.addPage();
-      drawRayvaPdfHeader(
+  y = drawPdfTableHeader(doc, y, columns);
+  exportRecords.forEach((r, index) => {
+    const values = [r.recordId, r.jobId, getWorkerDisplayName(r.workerId, r.workerName), r.currentRecordHash];
+    const layout = createPdfTableRowLayout(doc, values, columns);
+    if (y + layout.rowHeight > PDF_SAFE_BOTTOM) {
+      y = startContinuationPage(
         doc,
         'Execution Ledger Audit (Cont.)',
-        `Exported: ${timestamp} | Chain Status: ${statusText}`
+        `Exported: ${timestamp} | Chain Status: ${statusText}`,
+        columns
       );
-      y = 38;
-      doc.setFillColor(241, 245, 249);
-      doc.rect(14, y, 182, 8, 'F');
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(8);
-      doc.setTextColor(51, 65, 85);
-      doc.text('REC ID', 16, y + 5.5);
-      doc.text('JOB ID', 38, y + 5.5);
-      doc.text('WORKER', 68, y + 5.5);
-      doc.text('TIMESTAMP', 102, y + 5.5);
-      doc.text('RECORD HASH (SHA-256)', 138, y + 5.5);
-      y += 11;
-      doc.setFont('helvetica', 'normal');
-      doc.setFontSize(8);
     }
 
-    doc.setTextColor(14, 116, 144);
-    doc.setFont('helvetica', 'bold');
-    doc.text(r.recordId, 16, y);
-
-    doc.setFont('helvetica', 'normal');
-    doc.setTextColor(51, 65, 85);
-    doc.text(r.jobId, 38, y);
-    doc.text(getWorkerDisplayName(r.workerId, r.workerName).substring(0, 16), 68, y);
-    doc.text(new Date(r.timestamp).toLocaleTimeString(), 102, y);
-
-    doc.setTextColor(16, 185, 129);
-    doc.setFont('helvetica', 'bold');
-    doc.text(r.currentRecordHash.substring(0, 22) + '...', 138, y);
-
-    y += 6.5;
+    y = drawPdfTableRow(
+      doc,
+      y,
+      layout,
+      columns,
+      index,
+      ['0e7490', '334155', '334155', '10b981']
+    );
   });
 
   const fileTimestamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -334,20 +424,24 @@ export function exportLedgerToPdf(
 export function exportFullAuditBundleToJson(
   logs: SystemLog[],
   records: ExecutionRecord[],
-  status?: SystemStatus | null
+  status?: SystemStatus | null,
+  currentUser?: ExportUser | null,
+  jobs?: Job[]
 ) {
+  const exportLogs = filterLogsForExport(logs, currentUser);
+  const exportRecords = filterRecordsForExport(records, jobs, currentUser);
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const filename = `rayva_full_audit_bundle_${timestamp}.json`;
+  const filename = `${isAdminUser(currentUser) ? 'rayva_full_audit_bundle' : 'rayva_user_audit_bundle'}_${timestamp}.json`;
 
   const payload = {
     system: 'Rayva Cloud',
-    exportType: 'Full System Audit & Execution Ledger Bundle',
+    exportType: isAdminUser(currentUser) ? 'Full System Audit & Execution Ledger Bundle' : 'User Performance & Execution Bundle',
     exportedAt: new Date().toISOString(),
     clusterStatus: status || null,
-    systemLogsCount: logs.length,
-    executionRecordsCount: records.length,
-    systemLogs: logs,
-    executionLedger: records,
+    systemLogsCount: exportLogs.length,
+    executionRecordsCount: exportRecords.length,
+    systemLogs: exportLogs,
+    executionLedger: exportRecords,
   };
 
   downloadJsonFile(filename, payload);
@@ -356,14 +450,25 @@ export function exportFullAuditBundleToJson(
 export function exportFullAuditBundleToPdf(
   logs: SystemLog[],
   records: ExecutionRecord[],
-  status?: SystemStatus | null
+  status?: SystemStatus | null,
+  currentUser?: ExportUser | null,
+  jobs?: Job[]
 ) {
+  const isAdmin = isAdminUser(currentUser);
+  const exportLogs = filterLogsForExport(logs, currentUser);
+  const exportRecords = filterRecordsForExport(records, jobs, currentUser);
   const doc = new jsPDF();
   const timestamp = new Date().toLocaleString();
+  const reportTitle = isAdmin
+    ? 'Cluster Performance & Execution Audit Report'
+    : 'User Performance & Execution Report';
+  const continuationTitle = isAdmin
+    ? 'Cluster Performance & Execution Audit Report (Cont.)'
+    : 'User Performance & Execution Report (Cont.)';
 
   drawRayvaPdfHeader(
     doc,
-    'Cluster Performance & Execution Audit Report',
+    reportTitle,
     `Generated: ${timestamp} | Active Strategy: ${status?.activeStrategy || 'RESOURCE_AWARE'}`
   );
 
@@ -397,15 +502,21 @@ export function exportFullAuditBundleToPdf(
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(8);
   doc.setTextColor(51, 65, 85);
-  doc.text(`• Overall Health Status: ${healthGrade}`, 18, y + 14);
-  doc.text(`• CPU Utilization: ${status?.systemCpuUsage || 0}%`, 18, y + 20);
-  doc.text(`• RAM Utilization: ${status?.systemRamUsage || 0}%`, 18, y + 26);
-  doc.text(`• Avg Execution Time: ${status?.avgExecutionTimeMs || 0} ms`, 18, y + 32);
-
-  doc.text(`• Active Scheduling Strategy: ${status?.activeStrategy || 'RESOURCE_AWARE'}`, 100, y + 14);
-  doc.text(`• Online / Total Workers: ${status?.onlineWorkers || 0} / ${status?.totalWorkers || 0} (Failed: ${status?.failedWorkers || 0})`, 100, y + 20);
-  doc.text(`• Jobs Processed (Total): ${totalJobs} (Active: ${status?.activeJobs || 0}, Queued: ${status?.queuedJobs || 0})`, 100, y + 26);
-  doc.text(`• Job Completion Rate: ${completionRate}% (Failure Rate: ${failureRate}%)`, 100, y + 32);
+  const summaryLeft = 18;
+  const summaryRight = 100;
+  const summaryWidth = 78;
+  [
+    `• Overall Health Status: ${healthGrade}`,
+    `• CPU Utilization: ${status?.systemCpuUsage || 0}%`,
+    `• RAM Utilization: ${status?.systemRamUsage || 0}%`,
+    `• Avg Execution Time: ${status?.avgExecutionTimeMs || 0} ms`,
+  ].forEach((line, index) => doc.text(fitPdfText(doc, line, summaryWidth), summaryLeft, y + 14 + index * 6));
+  [
+    `• Active Scheduling Strategy: ${status?.activeStrategy || 'RESOURCE_AWARE'}`,
+    `• Online / Total Workers: ${status?.onlineWorkers || 0} / ${status?.totalWorkers || 0} (Failed: ${status?.failedWorkers || 0})`,
+    `• Jobs Processed (Total): ${totalJobs} (Active: ${status?.activeJobs || 0}, Queued: ${status?.queuedJobs || 0})`,
+    `• Job Completion Rate: ${completionRate}% (Failure Rate: ${failureRate}%)`,
+  ].forEach((line, index) => doc.text(fitPdfText(doc, line, summaryWidth), summaryRight, y + 14 + index * 6));
 
   y += 44;
 
@@ -413,38 +524,34 @@ export function exportFullAuditBundleToPdf(
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(10);
   doc.setTextColor(2, 132, 199);
-  doc.text(`1. VERIFIABLE EXECUTION LEDGER RECORDS (${records.length})`, 14, y);
+  doc.text(`1. VERIFIABLE EXECUTION LEDGER RECORDS (${exportRecords.length})`, 14, y);
 
   y += 6;
-  doc.setFillColor(241, 245, 249);
-  doc.rect(14, y, 182, 7, 'F');
-  doc.setFontSize(8);
-  doc.setTextColor(51, 65, 85);
-  doc.text('REC ID', 16, y + 5);
-  doc.text('JOB ID', 40, y + 5);
-  doc.text('WORKER', 70, y + 5);
-  doc.text('RECORD HASH (SHA-256)', 115, y + 5);
+  const ledgerColumns = [
+    { label: 'REC ID', x: 14, width: 40 },
+    { label: 'JOB ID', x: 54, width: 36 },
+    { label: 'WORKER', x: 90, width: 33 },
+    { label: 'RECORD HASH (SHA-256)', x: 123, width: 73 },
+  ];
+  y = drawPdfTableHeader(doc, y, ledgerColumns);
 
-  y += 10;
-  doc.setFont('helvetica', 'normal');
-
-  records.slice(0, 15).forEach((r) => {
-    if (y > 275) {
-      doc.addPage();
-      drawRayvaPdfHeader(doc, 'Cluster Performance & Execution Audit Report (Cont.)', `Generated: ${timestamp}`);
-      y = 38;
+  exportRecords.forEach((r, index) => {
+    const values = [r.recordId, r.jobId, getWorkerDisplayName(r.workerId, r.workerName), r.currentRecordHash];
+    const layout = createPdfTableRowLayout(doc, values, ledgerColumns);
+    if (y + layout.rowHeight > PDF_SAFE_BOTTOM) {
+      y = startContinuationPage(doc, continuationTitle, `Generated: ${timestamp}`, ledgerColumns);
     }
-    doc.setTextColor(14, 116, 144);
-    doc.text(r.recordId, 16, y);
-    doc.setTextColor(51, 65, 85);
-    doc.text(r.jobId, 40, y);
-    doc.text(getWorkerDisplayName(r.workerId, r.workerName).substring(0, 16), 70, y);
-    doc.setTextColor(16, 185, 129);
-    doc.text(r.currentRecordHash.substring(0, 28) + '...', 115, y);
-    y += 5.5;
+    y = drawPdfTableRow(
+      doc,
+      y,
+      layout,
+      ledgerColumns,
+      index,
+      ['0e7490', '334155', '334155', '10b981']
+    );
   });
 
-  if (records.length === 0) {
+  if (exportRecords.length === 0) {
     doc.setTextColor(100, 116, 139);
     doc.text('No ledger records recorded yet.', 16, y);
     y += 6;
@@ -453,52 +560,40 @@ export function exportFullAuditBundleToPdf(
   y += 6;
 
   // Section 2: Recent Audit Logs
-  if (y > 210) {
+  const logColumns = [
+    { label: 'TIME', x: 14, width: 28 },
+    { label: 'LEVEL', x: 42, width: 23 },
+    { label: 'COMPONENT', x: 65, width: 38 },
+    { label: 'MESSAGE', x: 103, width: 93 },
+  ];
+  if (y + 8 + 11 + PDF_TABLE_ROW_HEIGHT > PDF_SAFE_BOTTOM) {
     doc.addPage();
-    drawRayvaPdfHeader(doc, 'Cluster Performance & Execution Audit Report (Cont.)', `Generated: ${timestamp}`);
+    drawRayvaPdfHeader(doc, continuationTitle, `Generated: ${timestamp}`);
     y = 38;
   }
 
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(10);
   doc.setTextColor(2, 132, 199);
-  doc.text(`2. RECENT SYSTEM AUDIT LOGS (${logs.length})`, 14, y);
+  doc.text(`2. RECENT SYSTEM AUDIT LOGS (${exportLogs.length})`, 14, y);
 
   y += 6;
-  doc.setFillColor(241, 245, 249);
-  doc.rect(14, y, 182, 7, 'F');
-  doc.setFontSize(8);
-  doc.setTextColor(51, 65, 85);
-  doc.text('TIME', 16, y + 5);
-  doc.text('LEVEL', 42, y + 5);
-  doc.text('COMPONENT', 65, y + 5);
-  doc.text('MESSAGE', 105, y + 5);
-
-  y += 10;
-  doc.setFont('helvetica', 'normal');
-
-  logs.slice(0, 25).forEach((log) => {
-    if (y > 275) {
-      doc.addPage();
-      drawRayvaPdfHeader(doc, 'Cluster Performance & Execution Audit Report (Cont.)', `Generated: ${timestamp}`);
-      y = 38;
+  y = drawPdfTableHeader(doc, y, logColumns);
+  exportLogs.forEach((log, index) => {
+    const values = [new Date(log.timestamp).toLocaleTimeString(), log.level, log.component, log.message];
+    const layout = createPdfTableRowLayout(doc, values, logColumns);
+    if (y + layout.rowHeight > PDF_SAFE_BOTTOM) {
+      y = startContinuationPage(doc, continuationTitle, `Generated: ${timestamp}`, logColumns);
     }
-    doc.setTextColor(100, 116, 139);
-    doc.text(new Date(log.timestamp).toLocaleTimeString(), 16, y);
-
-    if (log.level === 'ERROR') doc.setTextColor(225, 29, 72);
-    else if (log.level === 'WARNING') doc.setTextColor(217, 119, 6);
-    else doc.setTextColor(2, 132, 199);
-
-    doc.setFont('helvetica', 'bold');
-    doc.text(log.level, 42, y);
-
-    doc.setFont('helvetica', 'normal');
-    doc.setTextColor(51, 65, 85);
-    doc.text(log.component.substring(0, 14), 65, y);
-    doc.text(log.message.substring(0, 48), 105, y);
-
-    y += 5.5;
+    const levelColor = log.level === 'ERROR' ? 'e11d48' : log.level === 'WARNING' ? 'd97706' : '0284c7';
+    y = drawPdfTableRow(
+      doc,
+      y,
+      layout,
+      logColumns,
+      index,
+      ['64748b', levelColor, '334155', '334155']
+    );
   });
 
   const fileTimestamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -537,13 +632,17 @@ export function exportSnapshotToPdf(snap: SystemSnapshot) {
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(8);
   doc.setTextColor(51, 65, 85);
-  doc.text(`• System CPU Usage: ${snap.metricsSummary.cpuUsage}%`, 18, y + 14);
-  doc.text(`• System RAM Usage: ${snap.metricsSummary.ramUsage}%`, 18, y + 20);
-  doc.text(`• Total Worker Nodes: ${snap.metricsSummary.totalWorkers}`, 18, y + 26);
-
-  doc.text(`• Total Jobs: ${snap.metricsSummary.totalJobs}`, 100, y + 14);
-  doc.text(`• Active Running Jobs: ${snap.metricsSummary.activeJobs}`, 100, y + 20);
-  doc.text(`• Completed Jobs: ${snap.metricsSummary.completedJobs}`, 100, y + 26);
+  const snapshotSummaryWidth = 78;
+  [
+    `• System CPU Usage: ${snap.metricsSummary.cpuUsage}%`,
+    `• System RAM Usage: ${snap.metricsSummary.ramUsage}%`,
+    `• Total Worker Nodes: ${snap.metricsSummary.totalWorkers}`,
+  ].forEach((line, index) => doc.text(fitPdfText(doc, line, snapshotSummaryWidth), 18, y + 14 + index * 6));
+  [
+    `• Total Jobs: ${snap.metricsSummary.totalJobs}`,
+    `• Active Running Jobs: ${snap.metricsSummary.activeJobs}`,
+    `• Completed Jobs: ${snap.metricsSummary.completedJobs}`,
+  ].forEach((line, index) => doc.text(fitPdfText(doc, line, snapshotSummaryWidth), 100, y + 14 + index * 6));
 
   y += 40;
 
@@ -554,37 +653,41 @@ export function exportSnapshotToPdf(snap: SystemSnapshot) {
   doc.text(`SNAPSHOT WORKERS (${snap.workers.length})`, 14, y);
 
   y += 6;
-  doc.setFillColor(241, 245, 249);
-  doc.rect(14, y, 182, 7, 'F');
-  doc.setFontSize(8);
-  doc.setTextColor(51, 65, 85);
-  doc.text('WORKER NAME', 16, y + 5);
-  doc.text('STATUS', 60, y + 5);
-  doc.text('CPU LOAD', 95, y + 5);
-  doc.text('RAM USAGE', 130, y + 5);
-  doc.text('COMPLETED JOBS', 165, y + 5);
+  const workerColumns = [
+    { label: 'WORKER NAME', x: 14, width: 46 },
+    { label: 'STATUS', x: 60, width: 35 },
+    { label: 'CPU LOAD', x: 95, width: 35 },
+    { label: 'RAM USAGE', x: 130, width: 35 },
+    { label: 'COMPLETED JOBS', x: 165, width: 31 },
+  ];
+  y = drawPdfTableHeader(doc, y, workerColumns);
 
-  y += 10;
-  doc.setFont('helvetica', 'normal');
-
-  snap.workers.forEach((w) => {
-    doc.setTextColor(51, 65, 85);
-    doc.text(getWorkerDisplayName(w.id, w.name), 16, y);
-
-    if (w.status === 'BUSY') doc.setTextColor(217, 119, 6);
-    else if (w.status === 'IDLE') doc.setTextColor(16, 185, 129);
-    else doc.setTextColor(225, 29, 72);
-
-    doc.setFont('helvetica', 'bold');
-    doc.text(w.status, 60, y);
-
-    doc.setFont('helvetica', 'normal');
-    doc.setTextColor(51, 65, 85);
-    doc.text(`${w.currentCpuUsage}%`, 95, y);
-    doc.text(`${w.currentRamUsage}%`, 130, y);
-    doc.text(`${w.completedJobs}`, 165, y);
-
-    y += 6;
+  snap.workers.forEach((w, index) => {
+    const values = [
+      getWorkerDisplayName(w.id, w.name),
+      w.status,
+      `${w.currentCpuUsage}%`,
+      `${w.currentRamUsage}%`,
+      `${w.completedJobs}`,
+    ];
+    const layout = createPdfTableRowLayout(doc, values, workerColumns);
+    if (y + layout.rowHeight > PDF_SAFE_BOTTOM) {
+      y = startContinuationPage(
+        doc,
+        `Snapshot: ${snap.name} (Cont.)`,
+        `ID: ${snap.id} | Timestamp: ${timestamp}`,
+        workerColumns
+      );
+    }
+    const statusColor = w.status === 'BUSY' ? 'd97706' : w.status === 'IDLE' ? '10b981' : 'e11d48';
+    y = drawPdfTableRow(
+      doc,
+      y,
+      layout,
+      workerColumns,
+      index,
+      ['334155', statusColor, '334155', '334155', '334155']
+    );
   });
 
   const fileTimestamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -633,7 +736,11 @@ export function exportHealthReportToPdf(report: {
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(10);
   doc.setTextColor(15, 23, 42);
-  doc.text(`EXECUTIVE POSTURE GRADE: ${report.healthGrade} (${report.healthScore}/100)`, 18, y + 8);
+  doc.text(
+    fitPdfText(doc, `EXECUTIVE POSTURE GRADE: ${report.healthGrade} (${report.healthScore}/100)`, 174),
+    18,
+    y + 8
+  );
 
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(8);
@@ -654,14 +761,14 @@ export function exportHealthReportToPdf(report: {
 
   doc.setFont('helvetica', 'normal');
   doc.setTextColor(51, 65, 85);
-  doc.text(`• Workers: ${report.metrics.workersOnline} / ${report.metrics.workersTotal} Online`, 18, y + 13);
-  doc.text(`• CPU Usage: ${report.metrics.cpuUsage}%`, 18, y + 18);
+  doc.text(fitPdfText(doc, `• Workers: ${report.metrics.workersOnline} / ${report.metrics.workersTotal} Online`, 58), 18, y + 13);
+  doc.text(fitPdfText(doc, `• CPU Usage: ${report.metrics.cpuUsage}%`, 58), 18, y + 18);
 
-  doc.text(`• RAM Usage: ${report.metrics.ramUsage}%`, 80, y + 13);
-  doc.text(`• Active Strategy: ${report.metrics.activeStrategy}`, 80, y + 18);
+  doc.text(fitPdfText(doc, `• RAM Usage: ${report.metrics.ramUsage}%`, 60), 80, y + 13);
+  doc.text(fitPdfText(doc, `• Active Strategy: ${report.metrics.activeStrategy}`, 60), 80, y + 18);
 
-  doc.text(`• Active/Queued Jobs: ${report.metrics.activeJobs} / ${report.metrics.queuedJobs}`, 145, y + 13);
-  doc.text(`• Maintenance Mode: ${report.metrics.maintenanceMode ? 'ACTIVE' : 'DISABLED'}`, 145, y + 18);
+  doc.text(fitPdfText(doc, `• Active/Queued Jobs: ${report.metrics.activeJobs} / ${report.metrics.queuedJobs}`, 49), 145, y + 13);
+  doc.text(fitPdfText(doc, `• Maintenance Mode: ${report.metrics.maintenanceMode ? 'ACTIVE' : 'DISABLED'}`, 49), 145, y + 18);
 
   y += 30;
 
@@ -677,8 +784,16 @@ export function exportHealthReportToPdf(report: {
   doc.setTextColor(51, 65, 85);
 
   report.keyObservations.forEach((obs) => {
-    doc.text(`• ${obs}`, 16, y);
-    y += 5.5;
+    const observationLines = doc.splitTextToSize(`• ${obs}`, 178);
+    observationLines.forEach((line: string) => {
+      if (y > PDF_SAFE_BOTTOM) {
+        doc.addPage();
+        drawRayvaPdfHeader(doc, 'System Health Executive Report (Cont.)', `Generated: ${dateStr}`);
+        y = 38;
+      }
+      doc.text(line, 16, y);
+      y += 5.5;
+    });
   });
 
   y += 6;
@@ -695,8 +810,16 @@ export function exportHealthReportToPdf(report: {
   doc.setTextColor(51, 65, 85);
 
   report.recommendations.forEach((rec) => {
-    doc.text(`• ${rec}`, 16, y);
-    y += 5.5;
+    const recommendationLines = doc.splitTextToSize(`• ${rec}`, 178);
+    recommendationLines.forEach((line: string) => {
+      if (y > PDF_SAFE_BOTTOM) {
+        doc.addPage();
+        drawRayvaPdfHeader(doc, 'System Health Executive Report (Cont.)', `Generated: ${dateStr}`);
+        y = 38;
+      }
+      doc.text(line, 16, y);
+      y += 5.5;
+    });
   });
 
   const fileTimestamp = new Date().toISOString().replace(/[:.]/g, '-');

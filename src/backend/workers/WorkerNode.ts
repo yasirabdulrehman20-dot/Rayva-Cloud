@@ -53,6 +53,15 @@ export class WorkerNode {
     this.recalculateScore();
   }
 
+  public restoreForNewMainNode(): void {
+    this.data.status = 'IDLE';
+    this.data.activeJobs = 0;
+    this.data.currentCpuUsage = 0;
+    this.data.currentRamUsage = 0;
+    this.data.currentWorkload = 0;
+    this.updateHeartbeat();
+  }
+
   public recalculateScore(): WorkerScoreBreakdown {
     // 1. CPU availability score (0..100)
     const cpuAvailScore = Math.max(0, 100 - this.data.currentCpuUsage);

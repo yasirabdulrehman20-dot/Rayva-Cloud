@@ -1,7 +1,9 @@
 import React, { useState } from 'react';
 import { Terminal, Send, HelpCircle } from 'lucide-react';
+import { useAuth } from '../context/AuthContext.tsx';
 
 export const CliView: React.FC = () => {
+  const { token } = useAuth();
   const [command, setCommand] = useState('');
   const [outputHistory, setOutputHistory] = useState<
     { cmd: string; result: string; timestamp: number }[]
@@ -25,11 +27,17 @@ export const CliView: React.FC = () => {
     try {
       const res = await fetch('/api/cli/exec', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
         body: JSON.stringify({ command: cmdStr }),
       });
 
       const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || `CLI request failed with status ${res.status}`);
+      }
       setOutputHistory((prev) => [
         { cmd: cmdStr, result: data.output || 'No output', timestamp: Date.now() },
         ...prev,

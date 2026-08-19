@@ -5,6 +5,7 @@ import { scheduler } from './scheduler/Scheduler.js';
 import { ExecutionEngine } from './jobs/ExecutionEngine.js';
 import { executionLedger } from './ledger/ExecutionLedger.js';
 import { logger } from './monitoring/SystemLogger.js';
+import { dbService } from './database/db.js';
 import {
   Job,
   JobType,
@@ -91,6 +92,10 @@ export class MainNode extends EventEmitter {
     }
   }
 
+  public async processQueuedJobs(): Promise<void> {
+    await this.processQueueLoop();
+  }
+
   private async dispatchJob(job: Job): Promise<void> {
     job.status = 'SCHEDULING';
     jobManager.updateJob(job);
@@ -101,16 +106,14 @@ export class MainNode extends EventEmitter {
 
     if (!selectedWorker) {
       // Re-queue since no worker was available
-      job.status = 'QUEUED';
-      jobManager.updateJob(job);
+      jobManager.requeueJob(job.id);
       this.emit('update');
       return;
     }
 
     const workerNode = workerManager.getWorkerNode(selectedWorker.id);
     if (!workerNode) {
-      job.status = 'QUEUED';
-      jobManager.updateJob(job);
+      jobManager.requeueJob(job.id);
       return;
     }
 
@@ -173,14 +176,35 @@ export class MainNode extends EventEmitter {
       );
 
       logger.info('MainNode', `Job #${job.id} completed successfully by ${workerNode.data.name} in ${result.executionTimeMs}ms`);
+      const owner = job.userId ? dbService.getUserById(job.userId) : null;
+      logger.info('UserActivity', `Job completed - ${job.id} - ${owner?.email || job.userId || 'unknown user'}`, {
+        action: 'JOB_COMPLETED',
+        userId: job.userId,
+        userEmail: owner?.email,
+        role: owner?.role,
+        resourceId: job.id,
+      });
     } catch (err: any) {
       logger.error('MainNode', `Execution failure on Job #${job.id} at worker ${workerId}: ${err.message}`);
+      const owner = job.userId ? dbService.getUserById(job.userId) : null;
+      logger.error('UserActivity', `Job failed - ${job.id} - ${owner?.email || job.userId || 'unknown user'}`, {
+        action: 'JOB_FAILED',
+        userId: job.userId,
+        userEmail: owner?.email,
+        role: owner?.role,
+        resourceId: job.id,
+      });
 
       workerNode?.recordJobFailure();
 
       // Trigger Fault Tolerance Re-queue & Retry
-      const requeued = jobManager.requeueJobForRetry(job.id, err.message || 'Worker execution error');
-      if (!requeued) {
+      const currentJobStatus: string = job.status;
+      const stillOwnedByFailedWorker =
+        job.assignedWorkerId === workerId && (currentJobStatus === 'RUNNING' || currentJobStatus === 'ASSIGNED');
+      const requeued = stillOwnedByFailedWorker
+        ? jobManager.requeueJobForRetry(job.id, err.message || 'Worker execution error')
+        : false;
+      if (!requeued && stillOwnedByFailedWorker) {
         job.status = 'FAILED';
         job.error = err.message || 'Job execution failed';
         jobManager.updateJob(job);

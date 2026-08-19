@@ -40,6 +40,7 @@ interface SidebarProps {
   activeJobs: number;
   jobs?: Job[];
   workers?: WorkerNodeData[];
+  isAdmin?: boolean;
   onSelectJob?: (job: Job) => void;
   onSelectWorker?: (worker: WorkerNodeData) => void;
   onOpenHealthReport?: () => void;
@@ -56,6 +57,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   activeJobs,
   jobs = [],
   workers = [],
+  isAdmin = false,
   onSelectJob,
   onSelectWorker,
   onOpenHealthReport,
@@ -132,8 +134,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
       badgeColor: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30',
     },
     { id: 'scheduler', label: 'Scheduler Engine', icon: <GitBranch className="w-4 h-4" /> },
-    { id: 'ledger', label: 'Execution Ledger', icon: <ShieldCheck className="w-4 h-4" /> },
-    { id: 'logs', label: 'System Logs', icon: <FileCode2 className="w-4 h-4" /> },
+    ...(isAdmin ? [
+      { id: 'ledger' as TabType, label: 'Execution Ledger', icon: <ShieldCheck className="w-4 h-4" /> },
+      { id: 'logs' as TabType, label: 'System Logs', icon: <FileCode2 className="w-4 h-4" /> },
+    ] : []),
     { id: 'analytics', label: 'Analytics', icon: <Activity className="w-4 h-4" /> },
     { id: 'snapshots', label: 'System Snapshots', icon: <Camera className="w-4 h-4" /> },
     { id: 'simulation', label: 'Simulation Mode', icon: <PlaySquare className="w-4 h-4" /> },

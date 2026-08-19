@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { ExecutionRecord } from '../shared/types.js';
+import { ExecutionRecord, Job, User } from '../shared/types.js';
 import { getWorkerDisplayName } from '../shared/workerUtils.js';
 import { ShieldCheck, CheckCircle2, AlertTriangle, RefreshCw } from 'lucide-react';
 import { exportLedgerToJson, exportLedgerToPdf } from '../utils/exportUtils.js';
@@ -7,10 +7,12 @@ import { ExportDropdown } from './ExportDropdown.tsx';
 
 interface LedgerViewProps {
   records: ExecutionRecord[];
+  jobs: Job[];
+  currentUser: Pick<User, 'id' | 'email' | 'role'>;
   onVerifyLedger: () => Promise<{ valid: boolean; recordCount: number; errors: string[] }>;
 }
 
-export const LedgerView: React.FC<LedgerViewProps> = ({ records, onVerifyLedger }) => {
+export const LedgerView: React.FC<LedgerViewProps> = ({ records, jobs, currentUser, onVerifyLedger }) => {
   const [verification, setVerification] = useState<{ valid: boolean; recordCount: number; errors: string[] } | null>(null);
   const [verifying, setVerifying] = useState(false);
 
@@ -25,11 +27,11 @@ export const LedgerView: React.FC<LedgerViewProps> = ({ records, onVerifyLedger 
   };
 
   const handleExportJson = () => {
-    exportLedgerToJson(records, verification);
+    exportLedgerToJson(records, verification, currentUser, jobs);
   };
 
   const handleExportPdf = () => {
-    exportLedgerToPdf(records, verification);
+    exportLedgerToPdf(records, verification, currentUser, jobs);
   };
 
   useEffect(() => {

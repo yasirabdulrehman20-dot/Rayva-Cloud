@@ -59,10 +59,15 @@ export class JobManager {
     this.queue.enqueue(job);
     dbService.saveJob(job);
 
-    logger.info('JobManager', `Submitted job #${job.id} [${job.name}] by owner [${ownerId}] with priority ${job.priority}`, {
+    const owner = dbService.getUserById(ownerId);
+    logger.info('JobManager', `Job submitted - ${job.id} - ${owner?.email || job.submittedBy || ownerId}`, {
+      action: 'JOB_SUBMITTED',
       type: job.type,
       payload,
       userId: ownerId,
+      userEmail: owner?.email,
+      role: owner?.role,
+      resourceId: job.id,
     });
 
     return job;
@@ -70,6 +75,19 @@ export class JobManager {
 
   public getNextJob(): Job | undefined {
     return this.queue.dequeue();
+  }
+
+  public requeueJob(jobId: string): boolean {
+    const job = this.jobsMap.get(jobId);
+    if (!job || job.status === 'CANCELLED' || job.status === 'COMPLETED' || job.status === 'FAILED') {
+      return false;
+    }
+
+    job.status = 'QUEUED';
+    this.queue.remove(jobId);
+    this.queue.enqueue(job);
+    dbService.saveJob(job);
+    return true;
   }
 
   public updateJob(job: Job): void {
@@ -89,7 +107,14 @@ export class JobManager {
     this.queue.remove(jobId);
     dbService.saveJob(job);
 
-    logger.warn('JobManager', `Cancelled job #${jobId}`);
+    const owner = job.userId ? dbService.getUserById(job.userId) : null;
+    logger.warn('JobManager', `Job cancelled - ${jobId} - ${owner?.email || job.submittedBy || job.userId || 'unknown user'}`, {
+      action: 'JOB_CANCELLED',
+      userId: job.userId,
+      userEmail: owner?.email,
+      role: owner?.role,
+      resourceId: jobId,
+    });
     return true;
   }
 
@@ -108,6 +133,7 @@ export class JobManager {
     job.retryCount++;
     job.status = 'RETRYING';
     job.error = `Retrying (${job.retryCount}/${job.maxRetries}): ${reason}`;
+    this.queue.remove(jobId);
     this.queue.enqueue(job);
     dbService.saveJob(job);
 

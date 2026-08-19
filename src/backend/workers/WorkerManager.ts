@@ -1,5 +1,5 @@
 import { WorkerNode } from './WorkerNode.js';
-import { WorkerNodeData, WorkerStatus } from '../../shared/types.js';
+import { WorkerNodeData } from '../../shared/types.js';
 import { dbService } from '../database/db.js';
 import { logger } from '../monitoring/SystemLogger.js';
 
@@ -29,6 +29,7 @@ export class WorkerManager {
 
         const node = new WorkerNode(wd.id, updatedName, wd.host, wd.cpuCapacity, wd.ramCapacity);
         node.data = { ...wd, name: updatedName, scoreBreakdown: wd.scoreBreakdown || undefined };
+        node.restoreForNewMainNode();
         this.workers.set(node.data.id, node);
         dbService.saveWorker(node.data);
       });

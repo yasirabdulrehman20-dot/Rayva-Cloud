@@ -75,6 +75,21 @@ export interface AuthenticatedRequest extends Request {
   token?: string;
 }
 
+function logUserActivity(
+  user: { id: string; email: string; role: string },
+  action: string,
+  message: string,
+  resourceId?: string
+): void {
+  logger.info('UserActivity', message, {
+    action,
+    userId: user.id,
+    userEmail: user.email,
+    role: user.role,
+    ...(resourceId ? { resourceId } : {}),
+  });
+}
+
 // Auth Middleware to protect private / administrative endpoints
 export const requireAuth = (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
   const authHeader = req.headers.authorization;
@@ -163,7 +178,12 @@ apiRouter.post('/auth/signup', signupLimiter, async (req, res) => {
   }
 
   if (autoVerifyOnSignup) {
-    logger.info('Auth', `New user registered and auto-verified: ${normalizedEmail} (${userRole})`);
+    logger.info('Auth', `User registered successfully - ${normalizedEmail}`, {
+      action: 'USER_REGISTERED',
+      userId: id,
+      userEmail: normalizedEmail,
+      role: userRole,
+    });
     const sessionToken = `rayva_token_${id}_${crypto.randomBytes(24).toString('hex')}`;
     dbService.createSession(id, sessionToken);
 
@@ -185,7 +205,13 @@ apiRouter.post('/auth/signup', signupLimiter, async (req, res) => {
     });
   }
 
-  logger.info('Auth', `New user registered (unverified): ${normalizedEmail} (${userRole})`);
+  logger.info('Auth', `User registered successfully - ${normalizedEmail}`, {
+    action: 'USER_REGISTERED',
+    userId: id,
+    userEmail: normalizedEmail,
+    role: userRole,
+    emailVerified: false,
+  });
 
   // Dispatch verification email if provider configured
   await emailService.sendVerificationEmail(normalizedEmail, sanitizedName, rawVerificationToken);
@@ -220,12 +246,22 @@ apiRouter.post('/auth/login', authLimiter, (req, res) => {
 
   // Anti-enumeration: consistent 401 response for missing user or wrong password
   if (!dbUser || !verifyPassword(password, dbUser.password)) {
+    logger.warn('Auth', `Login failed - ${normalizedEmail}`, {
+      action: 'USER_LOGIN_FAILED',
+      userEmail: normalizedEmail,
+      reason: 'INVALID_CREDENTIALS',
+    });
     return res.status(401).json({ error: 'Invalid email address or password.' });
   }
 
   // Check email verification status
   if (dbUser.email_verified === 0) {
-    logger.info('Auth', `Login rejected: unverified email ${normalizedEmail}`);
+    logger.info('Auth', `Login rejected - unverified email ${normalizedEmail}`, {
+      action: 'USER_LOGIN_REJECTED_UNVERIFIED',
+      userId: dbUser.id,
+      userEmail: dbUser.email,
+      role: dbUser.role,
+    });
     const isConfigured = emailService.isConfigured();
     const isDemo = demoModeService.isDemoModeEnabled();
     const demoActivationTicket = isDemo && !isConfigured && dbUser.role !== 'Cluster Admin' && dbUser.email !== 'admin@rayva.io'
@@ -246,10 +282,14 @@ apiRouter.post('/auth/login', authLimiter, (req, res) => {
     });
   }
 
-  logger.info('Auth', `User logged in successfully: ${normalizedEmail}`);
-
   const token = `rayva_token_${dbUser.id}_${crypto.randomBytes(24).toString('hex')}`;
   dbService.createSession(dbUser.id, token);
+  logger.info('Auth', `User login successful - ${dbUser.email}`, {
+    action: 'USER_LOGIN_SUCCESS',
+    userId: dbUser.id,
+    userEmail: dbUser.email,
+    role: dbUser.role,
+  });
 
   const user = {
     id: dbUser.id,
@@ -482,6 +522,15 @@ apiRouter.post('/auth/logout', (req, res) => {
   const authHeader = req.headers.authorization;
   if (authHeader && authHeader.startsWith('Bearer ')) {
     const token = authHeader.replace('Bearer ', '').trim();
+    const session = dbService.getSession(token);
+    const sessionUser = session ? dbService.getUserById(session.user_id) : null;
+    if (sessionUser) {
+      logUserActivity(
+        { id: sessionUser.id, email: sessionUser.email, role: sessionUser.role },
+        'USER_LOGOUT',
+        `User logout - ${sessionUser.email}`
+      );
+    }
     dbService.deleteSession(token);
   }
   res.json({ status: 'ok', message: 'Logged out successfully' });
@@ -534,7 +583,7 @@ apiRouter.get('/workers/:id', (req, res) => {
   res.json({ status: 'ok', data: worker });
 });
 
-apiRouter.post('/workers', requireAuth, (req, res) => {
+apiRouter.post('/workers', requireAuth, (req: AuthenticatedRequest, res) => {
   const { name, host, cpuCapacity, ramCapacity } = req.body;
   if (!name) {
     return res.status(400).json({ error: 'Worker name is required' });
@@ -542,23 +591,27 @@ apiRouter.post('/workers', requireAuth, (req, res) => {
   const id = `worker-${Date.now().toString(36)}`;
   const node = new WorkerNode(id, name, host, cpuCapacity || 4, ramCapacity || 16384);
   workerManager.registerWorker(node);
+  logUserActivity(req.user, 'WORKER_REGISTERED', `Worker registered - ${node.data.name}`, node.data.id);
   res.status(201).json({ status: 'ok', data: node.data });
 });
 
-apiRouter.post('/workers/:id/fail', requireAuth, (req, res) => {
+apiRouter.post('/workers/:id/fail', requireAuth, (req: AuthenticatedRequest, res) => {
   const success = workerManager.simulateWorkerFailure(req.params.id);
   if (!success) {
     return res.status(404).json({ error: 'Worker node not found' });
   }
+  logUserActivity(req.user, 'WORKER_FAILURE_SIMULATED', `Worker failure simulated - ${req.params.id}`, req.params.id);
   mainNode.emit('update');
   res.json({ status: 'ok', message: `Simulated node failure on worker ${req.params.id}` });
 });
 
-apiRouter.post('/workers/:id/recover', requireAuth, (req, res) => {
+apiRouter.post('/workers/:id/recover', requireAuth, (req: AuthenticatedRequest, res) => {
   const success = workerManager.recoverWorker(req.params.id);
   if (!success) {
     return res.status(404).json({ error: 'Worker node not found' });
   }
+  logUserActivity(req.user, 'WORKER_RECOVERED', `Worker recovered - ${req.params.id}`, req.params.id);
+  void mainNode.processQueuedJobs();
   mainNode.emit('update');
   res.json({ status: 'ok', message: `Recovered worker node ${req.params.id}` });
 });
@@ -594,6 +647,7 @@ apiRouter.post('/jobs', requireAuth, (req: AuthenticatedRequest, res: Response) 
     const userId = req.user.id;
     const submittedBy = req.user.name || req.user.email || 'User';
     const job = mainNode.submitJob(name, type, priority, payload, userId, submittedBy);
+    logUserActivity(req.user, 'JOB_SUBMITTED', `Job submitted - ${job.id} - ${req.user.email}`, job.id);
     res.status(201).json({ status: 'ok', data: job });
   } catch (err: any) {
     res.status(503).json({ error: err.message || 'Job submission rejected' });
@@ -614,6 +668,7 @@ apiRouter.delete('/jobs/:id', requireAuth, (req: AuthenticatedRequest, res: Resp
   if (!success) {
     return res.status(400).json({ error: 'Job cannot be cancelled or was not found' });
   }
+  logUserActivity(req.user, 'JOB_CANCELLED', `Job cancelled - ${req.params.id} - ${req.user.email}`, req.params.id);
   mainNode.emit('update');
   res.json({ status: 'ok', message: `Cancelled job ${req.params.id}` });
 });
@@ -632,12 +687,16 @@ apiRouter.post('/jobs/:id/cancel', requireAuth, (req: AuthenticatedRequest, res:
   if (!success) {
     return res.status(400).json({ error: 'Job cannot be cancelled or was not found' });
   }
+  logUserActivity(req.user, 'JOB_CANCELLED', `Job cancelled - ${req.params.id} - ${req.user.email}`, req.params.id);
   mainNode.emit('update');
   res.json({ status: 'ok', message: `Cancelled job ${req.params.id}` });
 });
 
 // --- Scheduler ---
-apiRouter.get('/scheduler/decisions', (req, res) => {
+apiRouter.get('/scheduler/decisions', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  if (req.user.role !== 'Cluster Admin') {
+    return res.status(403).json({ error: 'Only Cluster Admin users can view scheduler audit decisions.' });
+  }
   const decisions = scheduler.getRecentDecisions().map((d) => ({
     ...d,
     selectedWorkerName: getWorkerDisplayName(d.selectedWorkerId, d.selectedWorkerName),
@@ -652,34 +711,53 @@ apiRouter.get('/scheduler/strategies', (req, res) => {
   res.json({ status: 'ok', active, data: strategies });
 });
 
-apiRouter.post('/scheduler/strategy', requireAuth, (req, res) => {
+apiRouter.post('/scheduler/strategy', requireAuth, (req: AuthenticatedRequest, res) => {
   const { strategy } = req.body;
   const success = scheduler.setStrategy(strategy);
   if (!success) {
     return res.status(400).json({ error: `Invalid scheduling strategy: ${strategy}` });
   }
+  logUserActivity(req.user, 'SCHEDULER_STRATEGY_CHANGED', `Scheduler strategy changed - ${strategy}`, strategy);
   mainNode.emit('update');
   res.json({ status: 'ok', message: `Active strategy changed to ${strategy}` });
 });
 
 // --- Ledger ---
-apiRouter.get('/ledger', (req, res) => {
+apiRouter.get('/ledger', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  const isAdmin = req.user.role === 'Cluster Admin';
   const records = executionLedger.getRecords();
-  res.json({ status: 'ok', data: records });
+  const visibleRecords = isAdmin
+    ? records
+    : records.filter((record) => {
+        const job = jobManager.getJobForUser(record.jobId, req.user.id, false);
+        return Boolean(job);
+      });
+  res.json({ status: 'ok', data: visibleRecords });
 });
 
-apiRouter.get('/ledger/verify', (req, res) => {
+apiRouter.get('/ledger/verify', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  if (req.user.role !== 'Cluster Admin') {
+    return res.status(403).json({ error: 'Only Cluster Admin users can verify the execution ledger.' });
+  }
   const verification = executionLedger.verifyChainIntegrity();
   res.json({ status: 'ok', data: verification });
 });
 
 // --- Logs & Analytics & System ---
-apiRouter.get('/logs', (req, res) => {
+apiRouter.get('/logs', requireAuth, (req: AuthenticatedRequest, res: Response) => {
   const level = req.query.level as any;
   const search = req.query.search as string;
   const limit = req.query.limit ? parseInt(req.query.limit as string) : 200;
   const logs = logger.getLogs(limit, level, search);
-  res.json({ status: 'ok', data: logs });
+  const visibleLogs = req.user.role === 'Cluster Admin'
+    ? logs
+    : logs.filter((log) => {
+        if (log.component.toLowerCase() === 'auth') return false;
+        const metadata = log.metadata || {};
+        return metadata.userId === req.user.id || metadata.ownerId === req.user.id || metadata.createdBy === req.user.id ||
+          metadata.userEmail === req.user.email || metadata.email === req.user.email;
+      });
+  res.json({ status: 'ok', data: visibleLogs });
 });
 
 apiRouter.get('/system/status', (req, res) => {
@@ -693,6 +771,7 @@ apiRouter.post('/system/maintenance', requireAuth, (req, res) => {
     return res.status(400).json({ error: 'Property "enabled" must be a boolean.' });
   }
   mainNode.setMaintenanceMode(enabled);
+  logUserActivity(req.user, 'MAINTENANCE_MODE_CHANGED', `Maintenance mode ${enabled ? 'enabled' : 'disabled'} - ${req.user.email}`);
   res.json({
     status: 'ok',
     maintenanceMode: enabled,
@@ -700,7 +779,7 @@ apiRouter.post('/system/maintenance', requireAuth, (req, res) => {
   });
 });
 
-apiRouter.post('/system/stress-load', requireAuth, (req, res) => {
+apiRouter.post('/system/stress-load', requireAuth, (req: AuthenticatedRequest, res) => {
   if (mainNode.isMaintenanceMode()) {
     return res.status(503).json({ error: 'Cannot trigger stress load while system is in maintenance mode.' });
   }
@@ -715,11 +794,12 @@ apiRouter.post('/system/stress-load', requireAuth, (req, res) => {
     );
   }
   logger.warn('System', '[RESOURCE OVERLOAD SIMULATION] High-load stress workload injected into cluster.');
+  logUserActivity(req.user, 'STRESS_LOAD_STARTED', `Stress load started - ${req.user.email}`);
   mainNode.emit('update');
   res.json({ status: 'ok', message: 'Triggered cluster stress load (>90% target)' });
 });
 
-apiRouter.post('/system/clear-stress', requireAuth, (req, res) => {
+apiRouter.post('/system/clear-stress', requireAuth, (req: AuthenticatedRequest, res) => {
   const jobs = jobManager.getAllJobs();
   jobs.forEach((j) => {
     if (j.status === 'RUNNING' || j.status === 'QUEUED' || j.status === 'ASSIGNED') {
@@ -727,6 +807,7 @@ apiRouter.post('/system/clear-stress', requireAuth, (req, res) => {
     }
   });
   logger.info('System', '[RESOURCE LOAD RELIEF] Cleared active high-load jobs from queue.');
+  logUserActivity(req.user, 'STRESS_LOAD_CLEARED', `Stress load cleared - ${req.user.email}`);
   mainNode.emit('update');
   res.json({ status: 'ok', message: 'Cleared active workload and relieved system load.' });
 });
@@ -926,13 +1007,15 @@ apiRouter.get('/analytics', requireAuth, (req: AuthenticatedRequest, res: Respon
 });
 
 // --- Simulation ---
-apiRouter.post('/simulation/start', (req, res) => {
+apiRouter.post('/simulation/start', requireAuth, (req: AuthenticatedRequest, res) => {
   mainNode.startSimulation(req.body);
+  logUserActivity(req.user, 'SIMULATION_STARTED', `Simulation started - ${req.user.email}`);
   res.json({ status: 'ok', message: 'Simulation engine started' });
 });
 
-apiRouter.post('/simulation/pause', (req, res) => {
+apiRouter.post('/simulation/pause', requireAuth, (req: AuthenticatedRequest, res) => {
   mainNode.pauseSimulation();
+  logUserActivity(req.user, 'SIMULATION_PAUSED', `Simulation paused - ${req.user.email}`);
   res.json({ status: 'ok', message: 'Simulation engine paused' });
 });
 

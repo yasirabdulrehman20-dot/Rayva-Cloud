@@ -1,14 +1,15 @@
 import React, { useState } from 'react';
-import { SystemLog } from '../shared/types.js';
+import { SystemLog, User } from '../shared/types.js';
 import { FileCode2, Search, Copy, Check } from 'lucide-react';
 import { exportLogsToJson, exportLogsToPdf } from '../utils/exportUtils.js';
 import { ExportDropdown } from './ExportDropdown.tsx';
 
 interface LogsViewProps {
   logs: SystemLog[];
+  currentUser: Pick<User, 'id' | 'email' | 'role'>;
 }
 
-export const LogsView: React.FC<LogsViewProps> = ({ logs }) => {
+export const LogsView: React.FC<LogsViewProps> = ({ logs, currentUser }) => {
   const [levelFilter, setLevelFilter] = useState<string>('ALL');
   const [search, setSearch] = useState('');
   const [copied, setCopied] = useState(false);
@@ -38,11 +39,11 @@ export const LogsView: React.FC<LogsViewProps> = ({ logs }) => {
   };
 
   const handleExportJson = () => {
-    exportLogsToJson(filteredLogs, { level: levelFilter, search });
+    exportLogsToJson(filteredLogs, { level: levelFilter, search }, currentUser);
   };
 
   const handleExportPdf = () => {
-    exportLogsToPdf(filteredLogs, { level: levelFilter, search });
+    exportLogsToPdf(filteredLogs, { level: levelFilter, search }, currentUser);
   };
 
   return (

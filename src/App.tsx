@@ -486,6 +486,7 @@ function RayvaCloudContent() {
         activeJobs={sidebarActiveJobs}
         jobs={jobs}
         workers={workers}
+        isAdmin={isAdmin}
         onSelectJob={(job) => {
           setSelectedJob(job);
           setActiveTab('jobs');
@@ -496,8 +497,8 @@ function RayvaCloudContent() {
         }}
         onOpenHealthReport={() => setIsHealthReportOpen(true)}
         onOpenDbRecovery={() => setIsDbRecoveryOpen(true)}
-        onExportBundleJson={() => exportFullAuditBundleToJson(logs, ledgerRecords, status)}
-        onExportBundlePdf={() => exportFullAuditBundleToPdf(logs, ledgerRecords, status)}
+        onExportBundleJson={() => exportFullAuditBundleToJson(logs, ledgerRecords, status, user, jobs)}
+        onExportBundlePdf={() => exportFullAuditBundleToPdf(logs, ledgerRecords, status, user, jobs)}
       />
 
       {/* Main Content Area */}
@@ -511,8 +512,8 @@ function RayvaCloudContent() {
           onToggleMaintenance={handleToggleMaintenance}
           onOpenHealthReport={() => setIsHealthReportOpen(true)}
           onOpenDbRecovery={() => setIsDbRecoveryOpen(true)}
-          onExportBundleJson={() => exportFullAuditBundleToJson(logs, ledgerRecords, status)}
-          onExportBundlePdf={() => exportFullAuditBundleToPdf(logs, ledgerRecords, status)}
+          onExportBundleJson={() => exportFullAuditBundleToJson(logs, ledgerRecords, status, user, jobs)}
+          onExportBundlePdf={() => exportFullAuditBundleToPdf(logs, ledgerRecords, status, user, jobs)}
           isAutoRefresh={isAutoRefresh}
           onToggleAutoRefresh={setIsAutoRefresh}
         />
@@ -590,10 +591,10 @@ function RayvaCloudContent() {
           )}
 
           {activeTab === 'ledger' && (
-            <LedgerView records={ledgerRecords} onVerifyLedger={handleVerifyLedger} />
+            <LedgerView records={ledgerRecords} jobs={jobs} currentUser={user} onVerifyLedger={handleVerifyLedger} />
           )}
 
-          {activeTab === 'logs' && <LogsView logs={logs} />}
+          {activeTab === 'logs' && <LogsView logs={logs} currentUser={user} />}
 
           {activeTab === 'analytics' && (
             <AnalyticsView status={status} workers={workers} jobs={jobs} />
