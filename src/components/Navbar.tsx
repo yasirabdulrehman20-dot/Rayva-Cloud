@@ -23,6 +23,7 @@ interface NavbarProps {
   onRefresh: () => void;
   onChangeStrategy: (strat: SchedulerStrategyType) => void;
   onToggleMaintenance?: (enabled: boolean) => void;
+  canManageMaintenance?: boolean;
   onOpenHealthReport?: () => void;
   onExportBundleJson?: () => void;
   onExportBundlePdf?: () => void;
@@ -38,6 +39,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   onRefresh,
   onChangeStrategy,
   onToggleMaintenance,
+  canManageMaintenance = false,
   onOpenHealthReport,
   onExportBundleJson,
   onExportBundlePdf,
@@ -92,7 +94,7 @@ export const Navbar: React.FC<NavbarProps> = ({
         </div>
 
         {/* Maintenance Mode Toggle Switch */}
-        <div
+        {canManageMaintenance && <div
           onClick={() => onToggleMaintenance?.(!isMaintenance)}
           className={`flex items-center gap-1.5 px-2 py-1 rounded border text-xs font-mono transition-all cursor-pointer select-none shrink-0 ${
             isMaintenance
@@ -119,7 +121,7 @@ export const Navbar: React.FC<NavbarProps> = ({
               }`}
             />
           </button>
-        </div>
+        </div>}
 
         {/* Cluster Metric Pills */}
         <div className="hidden xl:flex items-center gap-2 text-xs font-mono shrink-0">

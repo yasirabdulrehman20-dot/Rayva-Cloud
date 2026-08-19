@@ -766,6 +766,10 @@ apiRouter.get('/system/status', (req, res) => {
 });
 
 apiRouter.post('/system/maintenance', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  if (req.user.role !== 'Cluster Admin') {
+    return res.status(403).json({ error: 'Only Cluster Admin users can manage maintenance mode.' });
+  }
+
   const { enabled } = req.body;
   if (typeof enabled !== 'boolean') {
     return res.status(400).json({ error: 'Property "enabled" must be a boolean.' });
@@ -780,6 +784,10 @@ apiRouter.post('/system/maintenance', requireAuth, (req: AuthenticatedRequest, r
 });
 
 apiRouter.post('/system/stress-load', requireAuth, (req: AuthenticatedRequest, res) => {
+  if (req.user.role !== 'Cluster Admin') {
+    return res.status(403).json({ error: 'Only Cluster Admin users can manage stress load.' });
+  }
+
   if (mainNode.isMaintenanceMode()) {
     return res.status(503).json({ error: 'Cannot trigger stress load while system is in maintenance mode.' });
   }
@@ -800,6 +808,10 @@ apiRouter.post('/system/stress-load', requireAuth, (req: AuthenticatedRequest, r
 });
 
 apiRouter.post('/system/clear-stress', requireAuth, (req: AuthenticatedRequest, res) => {
+  if (req.user.role !== 'Cluster Admin') {
+    return res.status(403).json({ error: 'Only Cluster Admin users can manage stress load.' });
+  }
+
   const jobs = jobManager.getAllJobs();
   jobs.forEach((j) => {
     if (j.status === 'RUNNING' || j.status === 'QUEUED' || j.status === 'ASSIGNED') {

@@ -179,13 +179,15 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
             {/* Banner Quick Actions */}
             <div className="flex items-center gap-2 self-start md:self-center shrink-0 flex-wrap">
-              <button
-                onClick={relieveStressLoad}
-                className="bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold px-3 py-1.5 rounded-sm text-xs transition-all shadow-md cursor-pointer flex items-center gap-1.5"
-              >
-                <Zap className="w-3.5 h-3.5" />
-                <span>RELIEVE LOAD</span>
-              </button>
+              {isAdmin && (
+                <button
+                  onClick={relieveStressLoad}
+                  className="bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold px-3 py-1.5 rounded-sm text-xs transition-all shadow-md cursor-pointer flex items-center gap-1.5"
+                >
+                  <Zap className="w-3.5 h-3.5" />
+                  <span>RELIEVE LOAD</span>
+                </button>
+              )}
 
               <button
                 onClick={() => onNavigate('workers')}

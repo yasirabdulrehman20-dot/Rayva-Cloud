@@ -510,6 +510,7 @@ function RayvaCloudContent() {
           onRefresh={fetchData}
           onChangeStrategy={handleChangeStrategy}
           onToggleMaintenance={handleToggleMaintenance}
+          canManageMaintenance={isAdmin}
           onOpenHealthReport={() => setIsHealthReportOpen(true)}
           onOpenDbRecovery={() => setIsDbRecoveryOpen(true)}
           onExportBundleJson={() => exportFullAuditBundleToJson(logs, ledgerRecords, status, user, jobs)}
@@ -537,12 +538,14 @@ function RayvaCloudContent() {
                 </div>
               </div>
             </div>
-            <button
-              onClick={() => handleToggleMaintenance(false)}
-              className="px-3 py-1 bg-amber-500/20 hover:bg-amber-500/40 text-amber-300 hover:text-amber-100 border border-amber-500/50 rounded-sm text-[11px] font-extrabold transition-all cursor-pointer whitespace-nowrap self-end sm:self-auto flex items-center gap-1.5"
-            >
-              <span>DISABLE MAINTENANCE</span>
-            </button>
+            {isAdmin && (
+              <button
+                onClick={() => handleToggleMaintenance(false)}
+                className="px-3 py-1 bg-amber-500/20 hover:bg-amber-500/40 text-amber-300 hover:text-amber-100 border border-amber-500/50 rounded-sm text-[11px] font-extrabold transition-all cursor-pointer whitespace-nowrap self-end sm:self-auto flex items-center gap-1.5"
+              >
+                <span>DISABLE MAINTENANCE</span>
+              </button>
+            )}
           </div>
         )}
 
